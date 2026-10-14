@@ -298,7 +298,23 @@ MODULEMAP
   # Swift names still resolve against them.
   "${script_dir}/verify-swift-names.sh" "${headers_dir}"
 
-  printf 'synced repository sources: headers\n'
+  # The OpenCC dictionary data, collected by the macos-arm64 slice, is committed
+  # under Sources/RimeOpenCCData the way the headers are: the release's committed
+  # copy is exactly what this run built. The manifest travels with it, so both
+  # this verification and the pull request check can account for every file.
+  local opencc_source_dir="${out_dir}/macos-arm64/opencc-data"
+  if [[ ! -f "${opencc_source_dir}/manifest.json" || ! -d "${opencc_source_dir}/opencc" ]]; then
+    printf 'the macos-arm64 slice produced incomplete opencc data (manifest: %s, directory: %s)\n' \
+      "${opencc_source_dir}/manifest.json" "${opencc_source_dir}/opencc" >&2
+    printf 'the slice must run scripts/build-one-arch.sh macos-arm64, which collects it\n' >&2
+    exit 1
+  fi
+  mkdir -p "${repo_root}/Sources/RimeOpenCCData/opencc"
+  rsync -a --delete "${opencc_source_dir}/opencc/" "${repo_root}/Sources/RimeOpenCCData/opencc/"
+  cp "${opencc_source_dir}/manifest.json" "${repo_root}/Sources/RimeOpenCCData/manifest.json"
+  "${script_dir}/verify-opencc-data.sh" "${repo_root}/Sources/RimeOpenCCData"
+
+  printf 'synced repository sources: headers, opencc data\n'
 }
 
 rsync -a --delete "${arm64_static_headers}/" "${static_universal_headers}/"
