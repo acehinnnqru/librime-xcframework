@@ -596,6 +596,107 @@ collect_librime_bundled_notices() {
   fi
 }
 
+# The OpenCC dictionary data librime reads at runtime: the `simplifier` filter
+# and librime-lua's `Opencc` resolve configs under <shared_data_dir>/opencc/ or
+# <user_data_dir>/opencc/, and nothing else supplies those files. The vcpkg
+# opencc port builds the data on the macOS triplets only - the iOS ones turn
+# BUILD_DATA off, because generating the compiled dictionaries runs host-built
+# tools - so the macOS arm64 slice is the single collection point, and the
+# release pipeline syncs what lands here into Sources/RimeOpenCCData, the form
+# consumers receive it in.
+#
+# Cleared rather than reused, for the same reason as the notices above: what
+# belongs here is decided by the opencc port and vcpkg.json, which the install
+# guard cannot see, and a stale set would ship dictionaries the shipped binaries
+# were not built against.
+collect_opencc_data() {
+  local output_dir="${install_dir}/opencc-data"
+  local data_dir="${output_dir}/opencc"
+  local share_dir source_file
+  local -a data_files=()
+
+  rm -rf "${output_dir}"
+  mkdir -p "${data_dir}"
+
+  # Same two trees the dependency-archive merge reads, in the same order: what
+  # this run installed wins over whatever the shared vcpkg checkout still holds
+  # from an unrelated project. Merging both would be a corruption vector, so the
+  # first existing tree is the only source.
+  share_dir="${static_build_dir}/vcpkg_installed/${triplet}/share/opencc"
+  if [[ ! -d "${share_dir}" ]]; then
+    share_dir="${vcpkg_root}/installed/${triplet}/share/opencc"
+  fi
+
+  # Only the data files and their license. vcpkg writes its own *.json
+  # bookkeeping (SPDX manifests) beside the data, so the conversion configs are
+  # told apart by content: an OpenCC config declares a conversion_chain and
+  # vcpkg's files do not. A bare *.json glob would ship that bookkeeping into a
+  # consumer's Rime data directory - or mistake it for data on a tree that has
+  # none, which is exactly what an iOS-style BUILD_DATA=off install holds.
+  local candidate ocd2_count=0 config_count=0
+  local -a selected=()
+  if [[ -d "${share_dir}" ]]; then
+    while IFS= read -r -d '' candidate; do
+      selected+=("${candidate}")
+      ocd2_count=$((ocd2_count + 1))
+    done < <(find "${share_dir}" -maxdepth 1 -type f -name '*.ocd2' -print0)
+    while IFS= read -r -d '' candidate; do
+      if grep -q '"conversion_chain"' "${candidate}"; then
+        selected+=("${candidate}")
+        config_count=$((config_count + 1))
+      fi
+    done < <(find "${share_dir}" -maxdepth 1 -type f -name '*.json' -print0)
+    while IFS= read -r -d '' candidate; do
+      selected+=("${candidate}")
+    done < <(find "${share_dir}" -maxdepth 1 -type f -name copyright -print0)
+  fi
+
+  if [[ ${ocd2_count} -eq 0 || ${config_count} -eq 0 ]]; then
+    printf 'no opencc data was found for triplet %s (dictionaries: %d, conversion configs: %d); searched:\n' \
+      "${triplet}" "${ocd2_count}" "${config_count}" >&2
+    printf '  %s\n' "${static_build_dir}/vcpkg_installed/${triplet}/share/opencc" >&2
+    printf '  %s\n' "${vcpkg_root}/installed/${triplet}/share/opencc" >&2
+    printf 'the macOS opencc port builds the dictionaries; without them the simplifier cannot load any config\n' >&2
+    exit 1
+  fi
+
+  for source_file in "${selected[@]}"; do
+    cp "${source_file}" "${data_dir}/"
+    data_files+=("$(basename "${source_file}")")
+  done
+
+  # The manifest is the release's statement of what the data is: the version of
+  # the opencc that produced it and a checksum per file, so the committed copy
+  # in Sources/RimeOpenCCData can be verified without a build
+  # (scripts/verify-opencc-data.sh) and the build metadata can record what a
+  # release ships.
+  python3 - "${share_dir}" "${data_files[@]}" <<'PY' > "${output_dir}/manifest.json"
+import hashlib
+import json
+import os
+import re
+import sys
+
+share_dir, names = sys.argv[1], sys.argv[2:]
+
+with open(os.path.join(share_dir, "OpenCCConfigVersion.cmake"), encoding="utf-8") as f:
+    match = re.search(r'set\(PACKAGE_VERSION "([^"]+)"\)', f.read())
+if not match:
+    sys.exit("OpenCCConfigVersion.cmake states no PACKAGE_VERSION")
+
+files = {}
+for name in sorted(names):
+    with open(os.path.join(share_dir, name), "rb") as f:
+        files[name] = hashlib.sha256(f.read()).hexdigest()
+
+print(json.dumps({
+    "opencc_version": match.group(1),
+    "files": files,
+}, indent=2, sort_keys=True))
+PY
+  printf 'collected opencc data: %d files from %s\n' "${#data_files[@]}" "${share_dir}"
+}
+
 # Test mode stops here: it exists to validate the packaging layer against
 # librime, not to produce artifacts, and building the static and dynamic slices
 # as well would only make a failing test slower to report.
@@ -725,6 +826,12 @@ install_plugin_headers "${dynamic_install_dir}/include"
 install_wrapper_apinotes "${dynamic_install_dir}/include"
 
 collect_vcpkg_notices "${install_dir}/notices"
+
+# Only the macOS arm64 slice collects: the iOS triplets do not build the data,
+# and the x86_64 slice would only duplicate what is architecture-independent.
+if [[ "${platform}" == "macos-arm64" ]]; then
+  collect_opencc_data
+fi
 
 # Record the resolved inputs next to the slice output. The packaging job reads
 # this from the downloaded slice (it has no upstream checkout of its own), and a

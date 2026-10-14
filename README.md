@@ -39,8 +39,19 @@ All consumer source code writes `import Rime`. The module exposes librime's C AP
 - `RimeDynamicStub` — a link-only handle for the dynamic framework. Declaring it emits `-framework RimeDynamic` and nothing else: no artifact is produced, so nothing is embedded, and the load command it records resolves at runtime against the app's embedded copy. XPC services and app extensions use it to share that copy (see below).
 - `RimeStatic` — the static XCFramework with librime dependencies merged into the archive. Linked automatically.
 - `RimeSystem` — binds against a system-provided or user-replaced librime implementation via `pkg-config rime` flags without distributing any librime headers. It also declares the `Rime` module, so do not combine `RimeSystem` and `Rime` in the same package graph.
+- `RimeOpenCCData` — the OpenCC conversion data librime reads at runtime, plus a one-call deploy helper. Optional and independent of the products above; apps that use 简繁 conversion declare it (see below).
 
 Wrapper libraries depend on `Rime` only. Terminal apps that use the binary artifacts depend on `Rime` plus exactly one of `RimeDynamic`/`RimeStatic` (linked automatically, or manually with `pkg-config rime` flags). Apps binding a system librime depend on `RimeSystem` alone — `RimeSystem` replaces `Rime` in the graph, never combines with it.
+
+### OpenCC conversion data (`RimeOpenCCData`)
+
+librime ships no OpenCC dictionaries. At runtime the `simplifier` filter resolves a schema's `opencc_config` (for example `t2s.json`) against `<shared_data_dir>/opencc/` first and `<user_data_dir>/opencc/` second — librime-lua's `Opencc` class uses the same two roots — and when neither holds the file, conversion fails silently with a log line. The `RimeOpenCCData` product carries the config and dictionary set built from the same opencc the binaries link, so the data version follows the release tag:
+
+```swift
+try RimeOpenCCData.deploy(to: sharedDataDirectory)
+```
+
+That copies `opencc/` into the Rime data directory, replacing any previous copy, and returns the destination. The destination itself must be writable at deploy time; the deployed `opencc/` subtree is read-only data afterwards — librime only reads from the shared side, while writes happen under the user side and staging — so placing it somewhere that never changes again is safe. The committed data is checksummed in `Sources/RimeOpenCCData/manifest.json` and verified by `scripts/verify-opencc-data.sh` in the pull request check; the release pipeline re-syncs it from each build.
 
 ### Linking without embedding a second librime (XPC services and app extensions)
 

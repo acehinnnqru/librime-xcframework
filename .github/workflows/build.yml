@@ -231,9 +231,11 @@ jobs:
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             # Sources/RimeSystem carries the second copy of Rime.apinotes, so it
-            # is committed together with the headers it was generated from.
-            git add Package.swift Sources/RimeHeaders Sources/RimeSystem
-            if git diff --cached --quiet -- Package.swift Sources/RimeHeaders Sources/RimeSystem; then
+            # is committed together with the headers it was generated from;
+            # Sources/RimeOpenCCData is the OpenCC data the package ships,
+            # synced from the macos-arm64 slice by the same packaging step.
+            git add Package.swift Sources/RimeHeaders Sources/RimeSystem Sources/RimeOpenCCData
+            if git diff --cached --quiet -- Package.swift Sources/RimeHeaders Sources/RimeSystem Sources/RimeOpenCCData; then
               echo "release manifest already matches ${PACKAGING_VERSION}; tagging current commit."
             else
               git commit -m "release: ${PACKAGING_VERSION}"

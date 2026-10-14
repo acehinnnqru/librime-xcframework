@@ -53,9 +53,9 @@ permissions:
   contents: read
 
 jobs:
-  # The committed headers, checked before anything is built: it is seconds of
-  # work, and a failure here should not wait behind a vcpkg bootstrap to be
-  # reported.
+  # The committed headers and data, checked before anything is built: it is
+  # seconds of work, and a failure here should not wait behind a vcpkg bootstrap
+  # to be reported.
   headers:
     name: committed headers
     runs-on: macos-15
@@ -65,6 +65,13 @@ jobs:
 
       - name: Verify committed headers
         run: scripts/verify-committed-headers.sh
+
+      # The OpenCC data the package ships through RimeOpenCCData, re-hashed
+      # against its manifest: the files are binary dictionaries no compiler
+      # reads, so corruption would otherwise surface only at a consumer's
+      # runtime, as a simplifier that cannot load its config.
+      - name: Verify committed OpenCC data
+        run: scripts/verify-opencc-data.sh
 
   # The configure matrix, expanded without a build: the preset file is the only
   # place it lives, so a flag that stopped being set has nothing else to catch it.

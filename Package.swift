@@ -12,7 +12,8 @@ let package = Package(
         .library(name: "RimeStatic", targets: ["RimeStatic"]),
         .library(name: "RimeDynamic", targets: ["RimeDynamic"]),
         .library(name: "RimeDynamicStub", targets: ["RimeDynamicStub"]),
-        .library(name: "RimeSystem", targets: ["RimeSystem"])
+        .library(name: "RimeSystem", targets: ["RimeSystem"]),
+        .library(name: "RimeOpenCCData", targets: ["RimeOpenCCData"])
     ],
     targets: [
         .systemLibrary(
@@ -24,6 +25,13 @@ let package = Package(
             path: "Sources/RimeDynamicStub",
             linkerSettings: [
                 .linkedFramework("RimeDynamic")
+            ]
+        ),
+        .target(
+            name: "RimeOpenCCData",
+            path: "Sources/RimeOpenCCData",
+            resources: [
+                .copy("opencc")
             ]
         ),
         .binaryTarget(

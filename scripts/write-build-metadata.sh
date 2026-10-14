@@ -139,6 +139,29 @@ if [[ -z "${plugin_entries}" ]]; then
   plugin_entries=""
 fi
 
+# The OpenCC data a release ships through RimeOpenCCData, read from the manifest
+# the build's collection step wrote and which the release sync copies into
+# Sources/RimeOpenCCData. Metadata that recorded no data description would
+# under-report what the release distributes, so a missing manifest is an error
+# rather than an omitted key.
+opencc_data_manifest="${repo_root}/Sources/RimeOpenCCData/manifest.json"
+if [[ ! -f "${opencc_data_manifest}" ]]; then
+  printf 'no opencc data manifest at %s; the release sync must run first\n' \
+    "${opencc_data_manifest}" >&2
+  exit 1
+fi
+opencc_data_json="$(python3 - "${opencc_data_manifest}" <<'PY'
+import json
+import sys
+
+manifest = json.load(open(sys.argv[1], encoding="utf-8"))
+print(json.dumps({
+    "opencc_version": manifest["opencc_version"],
+    "files": len(manifest["files"]),
+}))
+PY
+)"
+
 cat > "${output_path}" <<JSON
 {
   "packaging_version": "$(json_escape "${packaging_version}")",
@@ -149,6 +172,7 @@ cat > "${output_path}" <<JSON
   "packaging_commit": "$(json_escape "${packaging_commit}")",
   "xcode_version": "$(json_escape "${xcode_version}")",
   "runner_macos_version": "$(json_escape "${macos_version}")",
+  "opencc_data": ${opencc_data_json},
   "plugins": [
 ${plugin_entries}
   ],
