@@ -158,6 +158,9 @@ The publication sequence is:
 1. Resolve one upstream commit and use it for all five platform slices and tests.
 2. Package the privacy resources. Import the configured identity into a dedicated
    temporary keychain on the GitHub-hosted runner and sign only the dynamic SDK.
+   Require the imported certificate/private-key identity to match the configured
+   SHA-1 fingerprint. Preserve existing keychains while making the temporary
+   keychain searchable, and restore the original search list during cleanup.
 3. Verify the certificate-backed signature, secure timestamp, expected team,
    privacy manifests and extracted final ZIP. Delete the temporary `.p12` and
    keychain on exit, with an additional unconditional workflow cleanup step.
@@ -192,3 +195,12 @@ Apple references:
 
 Passing local checks does not guarantee App Store acceptance. Validate the actual
 Arkey archive and Apple's server-side processing before considering this resolved.
+
+If hosted signing reports that an item cannot be found in the keychain, confirm
+that the P12 includes the private key and that `SDK_SIGNING_IDENTITY` is the SHA-1
+fingerprint of the certificate actually exported. A newly created certificate has
+a different fingerprint even when its owner and team are unchanged. The workflow
+checks valid identities in the temporary keychain before signing and reports the
+available fingerprints on a mismatch. If none are available, check the private
+key, certificate expiry and trust chain. Do not change the fingerprint merely to
+select an unrelated certificate.

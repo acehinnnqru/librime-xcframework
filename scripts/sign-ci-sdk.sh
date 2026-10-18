@@ -12,13 +12,22 @@ for name in GITHUB_RUN_ID GITHUB_RUN_ATTEMPT; do
     exit 2
   fi
 done
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 work_dir="${RUNNER_TEMP}/sdk-signing-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
 keychain="${work_dir}/sdk.keychain-db"
 cleanup() {
+  local cleanup_status=0
   if [[ -d "${work_dir}" ]]; then
+    if [[ -f "${work_dir}/search-list.json" ]]; then
+      python3 "${script_dir}/ci-keychain.py" restore "${work_dir}/search-list.json" || cleanup_status=$?
+    fi
     security delete-keychain "${keychain}" >/dev/null 2>&1 || true
-    rm -rf "${work_dir}"
+    rm -f "${work_dir}/certificate.p12"
+    if [[ ${cleanup_status} -eq 0 ]]; then
+      rm -rf "${work_dir}"
+    fi
   fi
+  return "${cleanup_status}"
 }
 if [[ "${1:-}" == --cleanup && $# -eq 1 ]]; then
   cleanup
@@ -48,14 +57,16 @@ import base64, os, pathlib, sys
 encoded = "".join(os.environ["SDK_SIGNING_CERTIFICATE_P12_BASE64"].split())
 pathlib.Path(sys.argv[1]).write_bytes(base64.b64decode(encoded, validate=True))
 CERTIFICATE
+python3 "${script_dir}/ci-keychain.py" save "${work_dir}/search-list.json"
 security create-keychain -p "${password}" "${keychain}"
 security set-keychain-settings -lut 3600 "${keychain}"
 security unlock-keychain -p "${password}" "${keychain}"
 security import "${work_dir}/certificate.p12" -P "${SDK_SIGNING_CERTIFICATE_PASSWORD}" \
   -t cert -f pkcs12 -k "${keychain}" -T /usr/bin/codesign
-security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "${password}" "${keychain}" >/dev/null
 rm -f "${work_dir}/certificate.p12"
 unset SDK_SIGNING_CERTIFICATE_P12_BASE64 SDK_SIGNING_CERTIFICATE_PASSWORD
-script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+python3 "${script_dir}/ci-keychain.py" activate "${work_dir}/search-list.json" --keychain "${keychain}"
+python3 "${script_dir}/ci-keychain.py" verify-identity --keychain "${keychain}" --identity "${SDK_SIGNING_IDENTITY}"
+security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "${password}" "${keychain}" >/dev/null
 "${script_dir}/sign-local-sdk.sh" "$1" "${SDK_SIGNING_IDENTITY}" "${keychain}"
 python3 "${script_dir}/verify-release.py" signature "$1/librime-dynamic.xcframework" --team-id "${SDK_SIGNING_TEAM_ID}"

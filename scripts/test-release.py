@@ -14,6 +14,9 @@ sys.dont_write_bytecode = True
 spec = importlib.util.spec_from_file_location("release", Path(__file__).with_name("verify-release.py"))
 release = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(release)
+keychain_spec = importlib.util.spec_from_file_location("ci_keychain", Path(__file__).with_name("ci-keychain.py"))
+keychain = importlib.util.module_from_spec(keychain_spec)
+keychain_spec.loader.exec_module(keychain)
 
 
 class ReleaseTests(unittest.TestCase):
@@ -135,6 +138,87 @@ class ReleaseTests(unittest.TestCase):
         result = subprocess.run([str(release.ROOT / "scripts/sign-ci-sdk.sh"), str(self.dist)], env=env, capture_output=True, text=True)
         self.assertEqual(result.returncode, 2)
         self.assertIn("SHA-1", result.stderr)
+        self.assertFalse((self.root / "sdk-signing-1-1").exists())
+
+
+class CIKeychainTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="librime-keychain-test-")
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.state = self.root / "search-list.json"
+        self.original = ["/Users/runner/Library/Keychains/login.keychain-db", "/tmp/keychain with spaces"]
+        self.state.write_text(json.dumps(self.original))
+        self.fingerprint = "ABCDEF0123456789" * 2 + "ABCDEF01"
+
+    def test_save_preserves_paths_with_spaces(self):
+        output = '    "/Users/runner/Library/Keychains/login.keychain-db"\n    "/tmp/keychain with spaces"\n'
+        with patch.object(keychain.subprocess, "check_output", return_value=output):
+            keychain.save_search_list(self.state)
+        self.assertEqual(json.loads(self.state.read_text()), self.original)
+
+    def test_activate_preserves_original_keychains(self):
+        with patch.object(keychain.subprocess, "run") as run:
+            keychain.activate_keychain(self.state, Path("/tmp/sdk.keychain-db"))
+        self.assertEqual(run.call_args.args[0], ["security", "list-keychains", "-d", "user", "-s",
+                                               "/tmp/sdk.keychain-db", *self.original])
+
+    def test_restore_uses_exact_original_list(self):
+        with patch.object(keychain.subprocess, "run") as run:
+            keychain.restore_search_list(self.state)
+        self.assertEqual(run.call_args.args[0], ["security", "list-keychains", "-d", "user", "-s", *self.original])
+
+    def test_identity_match_is_case_insensitive(self):
+        output = f'  1) {self.fingerprint} "Fixture"\n     1 valid identities found\n'
+        with patch.object(keychain.subprocess, "check_output", return_value=output):
+            keychain.verify_identity(Path("fixture.keychain"), self.fingerprint.lower())
+
+    def test_mismatched_identity_is_rejected_with_available_fingerprint(self):
+        output = f'  1) {self.fingerprint} "Fixture"\n'
+        with patch.object(keychain.subprocess, "check_output", return_value=output):
+            with self.assertRaisesRegex(ValueError, self.fingerprint):
+                keychain.verify_identity(Path("fixture.keychain"), "0" * 40)
+
+    def test_no_private_key_identity_has_actionable_error(self):
+        with patch.object(keychain.subprocess, "check_output", return_value="0 valid identities found"):
+            with self.assertRaisesRegex(ValueError, "private key"):
+                keychain.verify_identity(Path("fixture.keychain"), self.fingerprint)
+
+    def run_signer(self, imported_fingerprint):
+        # Test doubles never import a certificate or access the machine's keychains.
+        mock_bin = self.root / "bin"
+        mock_bin.mkdir()
+        security = mock_bin / "security"
+        security.write_text('#!/bin/bash\nprintf \'%s\\n\' "$*" >> "$KEYCHAIN_TEST_LOG"\ncase "$1" in\n  list-keychains)\n    if [[ $# -eq 3 ]]; then\n      printf \'    "/tmp/original keychain"\\n\'\n    fi\n    ;;\n  find-identity)\n    printf \'  1) %s "Fixture"\\n     1 valid identities found\\n\' "$KEYCHAIN_TEST_IDENTITY"\n    ;;\nesac\n')
+        security.chmod(0o700)
+        log = self.root / "security.log"
+        env = dict(os.environ, PATH=str(mock_bin) + os.pathsep + os.environ["PATH"],
+                   GITHUB_ACTIONS="true", RUNNER_ENVIRONMENT="github-hosted",
+                   RUNNER_TEMP=str(self.root), GITHUB_RUN_ID="1", GITHUB_RUN_ATTEMPT="1",
+                   SDK_SIGNING_CERTIFICATE_P12_BASE64="Zml4dHVyZQ==", SDK_SIGNING_CERTIFICATE_PASSWORD="fixture",
+                   SDK_SIGNING_IDENTITY=self.fingerprint, SDK_SIGNING_TEAM_ID="ABCDEFGHIJ",
+                   KEYCHAIN_TEST_LOG=str(log), KEYCHAIN_TEST_IDENTITY=imported_fingerprint)
+        dist = self.root / "dist"
+        dist.mkdir()
+        result = subprocess.run([str(release.ROOT / "scripts/sign-ci-sdk.sh"), str(dist)],
+                                env=env, capture_output=True, text=True)
+        return result, log.read_text().splitlines()
+
+    def test_mismatch_stops_before_signing_and_restores_search_list(self):
+        result, calls = self.run_signer("0" * 40)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("matching SDK_SIGNING_IDENTITY", result.stderr)
+        self.assertFalse(any(line.startswith("set-key-partition-list") for line in calls))
+        self.assertEqual(calls[-2], "list-keychains -d user -s /tmp/original keychain")
+        self.assertTrue(calls[-1].startswith("delete-keychain "))
+        self.assertFalse((self.root / "sdk-signing-1-1").exists())
+
+    def test_later_signing_failure_also_restores_search_list(self):
+        result, calls = self.run_signer(self.fingerprint)
+        self.assertNotEqual(result.returncode, 0)  # The unsigned SDK fixture is deliberately absent.
+        self.assertIn("Configured signing identity is available", result.stdout)
+        self.assertEqual(calls[-2], "list-keychains -d user -s /tmp/original keychain")
+        self.assertTrue(calls[-1].startswith("delete-keychain "))
         self.assertFalse((self.root / "sdk-signing-1-1").exists())
 
 
