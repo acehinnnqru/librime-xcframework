@@ -15,15 +15,23 @@ on:
         description: Release tag for this packaged artifact, for example 1.17.0-pack.9.1.0. Leave empty to infer it from existing tags, which only ever bumps the patch, so set this explicitly to make a minor or generation release.
         required: false
         default: ""
+      sign_sdk:
+        description: Sign and verify the dynamic SDK in a build-only run. Publishing always signs.
+        required: false
+        type: boolean
+        default: false
       publish:
         description: Publish the GitHub Release and commit the release manifest. Set to false for a build-only run that stops after uploading the distribution artifact.
         required: false
         type: boolean
-        default: true
+        default: false
 
 permissions:
-  contents: write
-  actions: write
+  contents: read
+
+concurrency:
+  group: librime-${{ github.repository }}-${{ inputs.publish && 'publish' || github.run_id }}
+  cancel-in-progress: false
 
 jobs:
   # Resolved once, by one job: the slices build the ref this reports, and the
@@ -36,6 +44,37 @@ jobs:
     outputs:
       ref: ${{ steps.resolve-upstream.outputs.ref }}
     steps:
+      - name: Check publication branch
+        if: ${{ inputs.publish == true }}
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          RELEASE_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          if [[ "${REF_TYPE}" != branch || "${REF_NAME}" != "${RELEASE_BRANCH}" ]]; then
+            echo "Publication must run from the repository default branch." >&2
+            exit 1
+          fi
+
+      - name: Check signing configuration
+        if: ${{ inputs.publish == true || inputs.sign_sdk == true }}
+        env:
+          SDK_SIGNING_CERTIFICATE_P12_BASE64: ${{ secrets.SDK_SIGNING_CERTIFICATE_P12_BASE64 }}
+          SDK_SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.SDK_SIGNING_CERTIFICATE_PASSWORD }}
+          SDK_SIGNING_IDENTITY: ${{ vars.SDK_SIGNING_IDENTITY }}
+          SDK_SIGNING_TEAM_ID: ${{ vars.SDK_SIGNING_TEAM_ID }}
+        run: |
+          for name in SDK_SIGNING_CERTIFICATE_P12_BASE64 SDK_SIGNING_CERTIFICATE_PASSWORD SDK_SIGNING_IDENTITY SDK_SIGNING_TEAM_ID; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "Missing signing configuration: ${name}" >&2
+              exit 1
+            fi
+          done
+          if [[ ! "${SDK_SIGNING_IDENTITY}" =~ ^[0-9A-Fa-f]{40}$ || ! "${SDK_SIGNING_TEAM_ID}" =~ ^[A-Z0-9]{10}$ ]]; then
+            echo "Invalid signing certificate fingerprint or Apple team ID." >&2
+            exit 1
+          fi
+
       - name: Resolve upstream ref
         id: resolve-upstream
         env:
@@ -43,11 +82,21 @@ jobs:
           UPSTREAM_REPO: ${{ inputs.upstream_repo }}
           UPSTREAM_REF: ${{ inputs.upstream_ref }}
         run: |
+          if [[ ! "${UPSTREAM_REPO}" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+            echo "Invalid upstream repository." >&2
+            exit 1
+          fi
           ref="${UPSTREAM_REF}"
           if [[ -z "${ref}" ]]; then
             ref="$(gh api "repos/${UPSTREAM_REPO}/releases/latest" --jq .tag_name)"
           fi
-          echo "ref=${ref}" >> "${GITHUB_OUTPUT}"
+          encoded_ref="$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "${ref}")"
+          commit="$(gh api "repos/${UPSTREAM_REPO}/commits/${encoded_ref}" --jq .sha)"
+          if [[ ! "${commit}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Upstream ref did not resolve to an immutable commit." >&2
+            exit 1
+          fi
+          echo "ref=${commit}" >> "${GITHUB_OUTPUT}"
 
   build-slice:
     name: build ${{ matrix.platform }}
@@ -144,6 +193,8 @@ jobs:
 
   package:
     name: package
+    permissions:
+      contents: write
     # Tests gate packaging: a suite that fails means this packaging layer breaks
     # librime, and nothing should be released from it.
     needs: [build-slice, test]
@@ -190,17 +241,34 @@ jobs:
       - name: Resolve packaging version
         run: |
           version="$(scripts/resolve-packaging-version.sh)"
+          if [[ ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+-pack\.[0-9]+\.[0-9]+\.[0-9]+$ || "${version}" != "${UPSTREAM_VERSION}-pack."* ]]; then
+            echo "Packaging version must match the upstream version and packaging version format." >&2
+            exit 1
+          fi
           echo "PACKAGING_VERSION=${version}" >> "${GITHUB_ENV}"
           echo "packaging version: ${version}"
         env:
           PACKAGING_VERSION: ${{ inputs.packaging_version }}
 
+      - name: Check SDK privacy tooling
+        run: |
+          python3 scripts/test-sdk-privacy.py
+          python3 scripts/test-source-snapshot.py
+          python3 scripts/test-release.py
+
       - name: Package XCFramework
         run: scripts/package-xcframework.sh
 
-      # The package step already refreshed the committed headers; what is left is
-      # the release URLs, which only exist here. PACKAGING_VERSION was exported by
-      # the "Resolve packaging version" step.
+      - name: Sign dynamic SDK
+        if: ${{ inputs.publish == true || inputs.sign_sdk == true }}
+        env:
+          SDK_SIGNING_CERTIFICATE_P12_BASE64: ${{ secrets.SDK_SIGNING_CERTIFICATE_P12_BASE64 }}
+          SDK_SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.SDK_SIGNING_CERTIFICATE_PASSWORD }}
+          SDK_SIGNING_IDENTITY: ${{ vars.SDK_SIGNING_IDENTITY }}
+          SDK_SIGNING_TEAM_ID: ${{ vars.SDK_SIGNING_TEAM_ID }}
+        run: scripts/sign-ci-sdk.sh dist
+
+      # The final signed ZIP must exist before either checksum is recorded.
       - name: Generate SwiftPM manifest
         run: |
           release_base_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${PACKAGING_VERSION}"
@@ -214,67 +282,19 @@ jobs:
       - name: Write build metadata
         run: scripts/write-build-metadata.sh dist/build-metadata.json
 
-      # Compared against true rather than used directly: a string "false" is
-      # truthy in GitHub expressions, and the failure mode of a publish gate
-      # must be "did not publish", never "published when told not to".
-      - name: Commit and tag release manifest
-        if: ${{ inputs.publish == true }}
-        run: |
-          if git ls-remote --exit-code --tags origin "refs/tags/${PACKAGING_VERSION}" >/dev/null 2>&1; then
-            echo "tag already exists: ${PACKAGING_VERSION}; skipping manifest commit and tag."
-          else
-            if [[ "${GITHUB_REF_TYPE}" != "branch" ]]; then
-              echo "release manifest updates must run from a branch ref, got ${GITHUB_REF_TYPE}" >&2
-              exit 1
-            fi
-
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            # Sources/RimeSystem carries the second copy of Rime.apinotes, so it
-            # is committed together with the headers it was generated from;
-            # Sources/RimeOpenCCData is the OpenCC data the package ships,
-            # synced from the macos-arm64 slice by the same packaging step.
-            git add Package.swift Sources/RimeHeaders Sources/RimeSystem Sources/RimeOpenCCData
-            if git diff --cached --quiet -- Package.swift Sources/RimeHeaders Sources/RimeSystem Sources/RimeOpenCCData; then
-              echo "release manifest already matches ${PACKAGING_VERSION}; tagging current commit."
-            else
-              git commit -m "release: ${PACKAGING_VERSION}"
-            fi
-
-            git tag "${PACKAGING_VERSION}"
-            git push origin "HEAD:${GITHUB_REF_NAME}"
-            git push origin "refs/tags/${PACKAGING_VERSION}"
-          fi
-
-      # The release is created as a draft and its assets uploaded here, so a
-      # failure in any later step leaves nothing public. The final step flips it
-      # to published and marks it latest.
-      - name: Create draft release and upload assets
-        if: ${{ inputs.publish == true }}
+      - name: Verify final release inputs
         env:
-          GH_TOKEN: ${{ github.token }}
+          SIGNED: ${{ inputs.publish == true || inputs.sign_sdk == true }}
+          SDK_SIGNING_TEAM_ID: ${{ vars.SDK_SIGNING_TEAM_ID }}
         run: |
-          notes="Static and dynamic macOS/iOS XCFrameworks for ${UPSTREAM_REPO}@${UPSTREAM_REF}."
-          assets=(
-            dist/librime-static.xcframework.zip
-            dist/librime-dynamic.xcframework.zip
-            dist/librime-stub.zip
-            dist/LICENSE.txt
-            dist/THIRD_PARTY_NOTICES.md
-            dist/third-party-notices.zip
-            dist/build-metadata.json
-          )
-          if gh release view "${PACKAGING_VERSION}" >/dev/null 2>&1; then
-            # Re-run, or a draft left behind by an earlier attempt: refresh the
-            # assets in place rather than failing on the existing release.
-            gh release upload "${PACKAGING_VERSION}" "${assets[@]}" --clobber
+          if [[ "${SIGNED}" == true ]]; then
+            python3 scripts/verify-release.py distribution \
+              --repository "${GITHUB_REPOSITORY}" --version "${PACKAGING_VERSION}" \
+              --source-commit "${GITHUB_SHA}" --slices out --signed --team-id "${SDK_SIGNING_TEAM_ID}"
           else
-            # --verify-tag: the manifest step already pushed this tag at the
-            # manifest commit, and the release must attach to that commit rather
-            # than let GitHub create a tag pointing somewhere else.
-            gh release create "${PACKAGING_VERSION}" "${assets[@]}" \
-              --draft --verify-tag \
-              --title "${PACKAGING_VERSION}" --notes "${notes}"
+            python3 scripts/verify-release.py distribution \
+              --repository "${GITHUB_REPOSITORY}" --version "${PACKAGING_VERSION}" \
+              --source-commit "${GITHUB_SHA}" --slices out
           fi
 
       - name: Upload distribution artifact
@@ -289,25 +309,33 @@ jobs:
             dist/THIRD_PARTY_NOTICES.md
             dist/third-party-notices.zip
             dist/build-metadata.json
+            Package.swift
+            Sources/RimeHeaders
+            Sources/RimeSystem
+            Sources/RimeOpenCCData
 
-      # Last step that changes anything outside this run: everything else has
-      # succeeded by now, so this is the point where the release becomes public
-      # and latest.
-      - name: Publish release
+      - name: Commit, tag and publish verified release
         if: ${{ inputs.publish == true }}
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release edit "${PACKAGING_VERSION}" --draft=false --latest
+          RELEASE_BRANCH: ${{ github.event.repository.default_branch }}
+          SDK_SIGNING_TEAM_ID: ${{ vars.SDK_SIGNING_TEAM_ID }}
+        run: scripts/publish-release.sh
 
-      - name: Summarize run
+      - name: Summarize build-only run
         if: ${{ inputs.publish != true }}
+        env:
+          SIGNED: ${{ inputs.sign_sdk }}
         run: |
           {
             echo "### Build-only run: nothing was published"
             echo
-            echo "Packaged \`${UPSTREAM_REPO}@${UPSTREAM_REF}\` as \`${PACKAGING_VERSION}\`."
-            echo
-            echo "The release manifest was not committed, no tag was pushed, and no GitHub Release was created."
-            echo "Download the \`librime-xcframework\` artifact from this run to inspect the packaged zips."
-            echo "Because the run is not publishing, \`Package.swift\` in the checkout points at a release that does not exist yet."
+            echo "Packaged ${UPSTREAM_REPO}@${UPSTREAM_REF} as ${PACKAGING_VERSION}."
+            echo "Dynamic SDK signed: ${SIGNED}."
+            echo "No commit, tag, push or GitHub Release was created."
+            echo "The artifact includes dist/ and generated SwiftPM source for inspection."
           } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Clean temporary signing material
+        if: ${{ always() && (inputs.publish == true || inputs.sign_sdk == true) }}
+        run: scripts/sign-ci-sdk.sh --cleanup

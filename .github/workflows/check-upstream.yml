@@ -8,7 +8,7 @@ on:
         required: true
         default: rime/librime
       force:
-        description: Build and publish even if a pack release already exists for the latest upstream version.
+        description: Build even if a pack release already exists for the latest upstream version.
         required: false
         type: boolean
         default: false
@@ -29,6 +29,7 @@ jobs:
           GH_REPO: ${{ github.repository }}
           UPSTREAM_REPO: ${{ inputs.upstream_repo || 'rime/librime' }}
           FORCE: ${{ inputs.force }}
+          PUBLISH: ${{ vars.AUTO_PUBLISH_RELEASES == 'true' }}
         run: |
           set -o pipefail
 
@@ -40,7 +41,7 @@ jobs:
             # check has nothing to do. Both suffix forms count: the old bare
             # counter and the generation.minor.patch scheme that replaced it.
             existing_release="$(
-              gh api --paginate "repos/${GH_REPO}/releases" --jq '.[].tag_name' |
+              gh api --paginate "repos/${GH_REPO}/releases" --jq '.[] | select(.draft == false) | .tag_name' |
                 while read -r tag; do
                   suffix="${tag#"${upstream_version}-pack."}"
                   if [[ "${suffix}" != "${tag}" &&
@@ -60,4 +61,4 @@ jobs:
           gh workflow run build.yml \
             -f upstream_repo="${UPSTREAM_REPO}" \
             -f upstream_ref="${latest_tag}" \
-            -f publish=true
+            -f publish="${PUBLISH}"

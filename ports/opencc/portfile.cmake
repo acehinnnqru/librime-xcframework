@@ -26,7 +26,11 @@ set(opencc_options
     -DPKG_CONFIG_EXECUTABLE=${CURRENT_HOST_INSTALLED_DIR}/tools/pkgconf/pkgconf
 )
 
-if(DEFINED VCPKG_CMAKE_SYSTEM_NAME AND VCPKG_CMAKE_SYSTEM_NAME STREQUAL "iOS")
+# Generate dictionaries only with tools that can run on the build host.
+# A different custom triplet can still have the same CPU, so compare the
+# architecture rather than VCPKG_CROSSCOMPILING (which compares triplet names).
+if((DEFINED VCPKG_CMAKE_SYSTEM_NAME AND VCPKG_CMAKE_SYSTEM_NAME STREQUAL "iOS")
+   OR (VCPKG_TARGET_IS_OSX AND NOT HOST_TRIPLET MATCHES "^${VCPKG_TARGET_ARCHITECTURE}-osx"))
     set(opencc_builds_target_tools OFF)
     list(APPEND opencc_options
         -DBUILD_TOOLS=OFF

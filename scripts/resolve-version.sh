@@ -31,6 +31,38 @@ if [[ -z "${source_dir}" ]]; then
   fi
 fi
 
+# Flake inputs are immutable source snapshots without .git. Metadata lives
+# with the selected source so changing UPSTREAM_SOURCE_DIR cannot reuse stale
+# revision environment variables from another source tree.
+snapshot_ref=""
+snapshot_commit=""
+snapshot_repo=""
+if [[ -n "${source_dir}" && -f "${source_dir}/.librime-source.json" ]]; then
+  snapshot_metadata="$(python3 - "${source_dir}/.librime-source.json" <<'SNAPSHOT'
+import json, re, sys
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+if not re.fullmatch(r"[0-9a-f]{40}", value["commit"]):
+    sys.exit("invalid source snapshot commit")
+for key in ("ref", "commit", "repo"):
+    item = value[key]
+    if not isinstance(item, str) or not item or any(c in item for c in "\n\r="):
+        sys.exit("invalid source snapshot metadata")
+    print(item)
+SNAPSHOT
+)"
+  snapshot_ref="$(sed -n '1p' <<< "${snapshot_metadata}")"
+  snapshot_commit="$(sed -n '2p' <<< "${snapshot_metadata}")"
+  snapshot_repo="$(sed -n '3p' <<< "${snapshot_metadata}")"
+fi
+if [[ "${1:-human}" == "--print-snapshot-ref" ]]; then
+  printf '%s\n' "${snapshot_ref}"
+  exit 0
+fi
+if [[ "${1:-human}" == "--print-snapshot-commit" ]]; then
+  printf '%s\n' "${snapshot_commit}"
+  exit 0
+fi
+
 if [[ "${1:-human}" == "--print-source-dir" ]]; then
   if [[ -z "${source_dir}" || ! -d "${source_dir}" ]]; then
     exit 1
@@ -41,12 +73,12 @@ fi
 
 packaging_version="${PACKAGING_VERSION:-}"
 
-upstream_repo="${UPSTREAM_REPO:-rime/librime}"
+upstream_repo="${UPSTREAM_REPO:-${snapshot_repo:-rime/librime}}"
 # "worktree" is what build-one-arch.sh exports when it built the checkout
 # rather than a ref; anything else is a ref that was resolved before building.
 upstream_ref="${UPSTREAM_REF:-}"
 if [[ -z "${upstream_ref}" ]]; then
-  upstream_ref="worktree"
+  upstream_ref="${snapshot_ref:-worktree}"
 fi
 
 # The version and commit come from the tree when there is one, which is what a
@@ -62,7 +94,7 @@ if [[ "${upstream_version}" == "unknown" ]]; then
   upstream_version="${UPSTREAM_VERSION:-unknown}"
 fi
 
-upstream_commit="unknown"
+upstream_commit="${snapshot_commit:-unknown}"
 if [[ -n "${source_dir}" && -d "${source_dir}/.git" ]]; then
   if git -C "${source_dir}" rev-parse "${upstream_ref}^{commit}" >/dev/null 2>&1; then
     upstream_commit="$(git -C "${source_dir}" rev-parse "${upstream_ref}^{commit}")"

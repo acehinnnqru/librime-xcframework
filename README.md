@@ -4,6 +4,14 @@ Static and dynamic macOS/iOS XCFramework packaging for upstream `librime`.
 
 This repository builds a binary distribution so Xcode and SwiftPM consumers do not need to compile librime and its C++ dependency graph themselves.
 
+## Privacy and local signing
+
+Dynamic SDK privacy resources, build-only validation, the Nix development shell,
+and local certificate signing are documented in [privacy/README.md](privacy/README.md).
+GitHub Actions supports signed build-only validation and automatic releases.
+Configure the Apple signing Secrets and variables described in that guide before
+running with `sign_sdk: true` or `publish: true`.
+
 ## Artifacts
 
 A release contains:
@@ -17,6 +25,10 @@ A release contains:
 - `build-metadata.json`
 
 The static XCFramework contains macOS arm64/x86_64, iOS device arm64, and iOS simulator arm64/x86_64 library slices. The dynamic XCFramework contains `RimeDynamic.framework` slices for macOS, iOS device, and iOS simulator. The macOS slice is a versioned deep bundle (`Versions/A`, install name `@rpath/RimeDynamic.framework/Versions/A/RimeDynamic`) so SwiftPM-embedded copies already satisfy macOS app validation without a post-embed fix-up script. Both include the public librime C API headers but no module maps; the `Rime` Swift module is provided by the package's headers product. GitHub Releases exposes the SHA-256 digest for each uploaded asset.
+
+On macOS the Nix shell also supplies a locked, read-only vcpkg bundle and sets
+`VCPKG_ROOT`; no separate vcpkg checkout is needed. It also supplies locked librime 1.17.0 source and sets `UPSTREAM_SOURCE_DIR`.
+Xcode and initialized pinned plugin submodules are still required for a full build.
 
 ### Platform minimums
 
@@ -106,23 +118,22 @@ The modules previously shipped as `RimeStatic`, `RimeDynamic`, and `RimeSystem`;
 Prerequisites:
 
 - macOS with Xcode command line tools
-- CMake and Ninja
-- vcpkg, with `VCPKG_ROOT` pointing at the vcpkg checkout
-- upstream `librime` source at `../librime` or `vendor/librime` (`vendor/librime`
-  may be a symlink to a development checkout; builds only read it)
+- CMake, Ninja and vcpkg (provided by the macOS flake shell, including `VCPKG_ROOT`)
+- upstream `librime` 1.17.0 source (provided by the flake); set
+  `UPSTREAM_SOURCE_DIR` to explicitly use a separate development checkout
 - plugin submodules initialized: `git submodule update --init --recursive`
 
 Build and package:
 
 ```bash
-VCPKG_ROOT=/path/to/vcpkg scripts/build-all.sh
+direnv exec . scripts/build-all.sh
 ```
 
 Build one slice:
 
 ```bash
-VCPKG_ROOT=/path/to/vcpkg scripts/build-one-arch.sh arm64
-VCPKG_ROOT=/path/to/vcpkg scripts/build-one-arch.sh x86_64
+direnv exec . scripts/build-one-arch.sh macos-arm64
+direnv exec . scripts/build-one-arch.sh macos-x86_64
 ```
 
 Package existing slice outputs:
@@ -144,7 +155,7 @@ The presets are usable by hand against a staged tree, which is the point of
 keeping them in a file rather than in shell:
 
 ```bash
-export VCPKG_ROOT=/path/to/vcpkg
+# VCPKG_ROOT is already exported by the flake shell.
 export WRAPPER_ROOT="$PWD"   # this repository, for triplets/ and ports/
 export OUT_DIR="$PWD/out"
 cd .build/src-macos-arm64
@@ -165,7 +176,7 @@ slice means a new triplet, a new preset for it, and its name in
 Run the tests:
 
 ```bash
-BUILD_TESTS=1 VCPKG_ROOT=/path/to/vcpkg scripts/build-one-arch.sh macos-arm64
+direnv exec . env BUILD_TESTS=1 scripts/build-one-arch.sh macos-arm64
 ```
 
 That builds one shared tree and runs both suites against it, then stops: upstream

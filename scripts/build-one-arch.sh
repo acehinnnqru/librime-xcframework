@@ -152,7 +152,19 @@ export UPSTREAM_SOURCE_DIR="${source_dir}"
 # explicit UPSTREAM_REF that ref's committed content is built, and an
 # unresolvable ref is an error rather than a silent fallback to the checkout.
 upstream_ref="${UPSTREAM_REF:-}"
-if [[ -z "${upstream_ref}" ]]; then
+snapshot_ref="$("${script_dir}/resolve-version.sh" --print-snapshot-ref)"
+snapshot_commit="$("${script_dir}/resolve-version.sh" --print-snapshot-commit)"
+build_from_snapshot=0
+if [[ -n "${snapshot_ref}" ]]; then
+  if [[ -n "${upstream_ref}" && "${upstream_ref}" != "${snapshot_ref}" && "${upstream_ref}" != "${snapshot_commit}" ]]; then
+    printf 'UPSTREAM_REF=%s does not match source snapshot %s (%s)\n' \
+      "${upstream_ref}" "${snapshot_ref}" "${snapshot_commit}" >&2
+    exit 1
+  fi
+  build_from_worktree=1
+  build_from_snapshot=1
+  upstream_ref="${upstream_ref:-${snapshot_ref}}"
+elif [[ -z "${upstream_ref}" ]]; then
   build_from_worktree=1
   upstream_ref="worktree"
 elif [[ -d "${source_dir}/.git" ]] && git -C "${source_dir}" rev-parse "${upstream_ref}^{commit}" >/dev/null 2>&1; then
@@ -201,7 +213,7 @@ done
 # in this guard would re-export and re-patch the whole upstream tree on any edit
 # to it - including a description. What a preset edit must discard is a build
 # tree, and those guards hash the file themselves.
-source_guard="ref=${upstream_ref}"
+source_guard="source=${source_dir} ref=${upstream_ref} snapshot=${snapshot_commit}"
 while IFS= read -r -d '' patch_file; do
   source_guard+=" patch:$(cksum < "${patch_file}")"
 done < <(find "${repo_root}/patches" -name '*.patch' -print0 | sort -z)
@@ -222,8 +234,17 @@ if [[ "${build_from_worktree}" -eq 0 ]]; then
   printf 'exporting %s from %s\n' "${upstream_ref}" "${source_dir}"
   git -C "${source_dir}" archive "${upstream_ref}" | tar -x -C "${source_work_dir}"
 else
-  printf 'copying working tree from %s\n' "${source_dir}"
-  rsync -a --delete --exclude .git "${source_dir}/" "${source_work_dir}/"
+  printf 'copying source tree from %s\n' "${source_dir}"
+  if [[ "${build_from_snapshot}" -eq 1 ]]; then
+    # Source snapshots in the Nix store are read-only. Patches apply only to
+    # this writable staging copy; the pinned source stays immutable.
+    rsync -a --delete --exclude .git "${source_dir}/" "${source_work_dir}/"
+    # Apple's rsync may retain read-only source modes despite --chmod.
+    # Normalize only the generated staging copy before patching it.
+    chmod -R u+w "${source_work_dir}"
+  else
+    rsync -a --delete --exclude .git "${source_dir}/" "${source_work_dir}/"
+  fi
 fi
 
 "${script_dir}/apply-patches.sh" "${source_work_dir}"

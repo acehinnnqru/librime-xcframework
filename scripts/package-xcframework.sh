@@ -129,6 +129,7 @@ create_dynamic_framework() {
   install_name_tool -id "@rpath/${framework_name}.framework/${framework_name}" "${framework_path}/${framework_name}"
   rsync -a --delete --exclude module.modulemap "${headers_path}/" "${framework_path}/Headers/"
   write_dynamic_info_plist "${framework_path}/Info.plist" "${minimum_os_version}"
+  cp "${repo_root}/privacy/PrivacyInfo.xcprivacy" "${framework_path}/PrivacyInfo.xcprivacy"
 }
 
 # macOS validates embedded frameworks as versioned bundles, so the macOS slice
@@ -149,6 +150,7 @@ create_macos_dynamic_framework() {
   install_name_tool -id "@rpath/${framework_name}.framework/Versions/A/${framework_name}" "${bundle_root}/${framework_name}"
   rsync -a --delete --exclude module.modulemap "${headers_path}/" "${bundle_root}/Headers/"
   write_dynamic_info_plist "${bundle_root}/Resources/Info.plist" "${minimum_os_version}"
+  cp "${repo_root}/privacy/PrivacyInfo.xcprivacy" "${bundle_root}/Resources/PrivacyInfo.xcprivacy"
   ln -sfn "A" "${framework_path}/Versions/Current"
   ln -sfn "Versions/Current/${framework_name}" "${framework_path}/${framework_name}"
   ln -sfn "Versions/Current/Headers" "${framework_path}/Headers"
@@ -350,6 +352,8 @@ xcodebuild -create-xcframework \
   -framework "${ios_device_dynamic_framework}" \
   -framework "${ios_simulator_dynamic_framework}" \
   -output "${dynamic_xcframework_path}"
+
+python3 "${script_dir}/verify-sdk-privacy.py" "${dynamic_xcframework_path}"
 
 generate_linker_stubs
 

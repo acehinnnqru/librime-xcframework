@@ -41,6 +41,7 @@ on:
       # plugin's public API. They are validated without a build, since a mistake
       # there would otherwise surface while preparing a release.
       - "Sources/**"
+      - "privacy/**"
       # So that an edit to the test procedure is itself tested.
       - ".github/workflows/run-tests.yml"
       - ".github/workflows/test.yml"
@@ -62,6 +63,12 @@ jobs:
     steps:
       - name: Checkout packaging repository
         uses: actions/checkout@v7
+
+      - name: Check SDK privacy tooling
+        run: |
+          python3 scripts/test-sdk-privacy.py
+          python3 scripts/test-source-snapshot.py
+          python3 scripts/test-release.py
 
       - name: Verify committed headers
         run: scripts/verify-committed-headers.sh
